@@ -28,7 +28,7 @@
 
 1. **Start the Program:**
    ```bash
-   python zone_spy.py
+   python zoneSpy.py
    ```
 
 2. **Menu Options:**
