@@ -9,17 +9,9 @@ from urllib.parse import urlparse
 import argparse
 import sys
 import tldextract
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 from colorama import Fore, Back, Style, init
-import os
-import sys
-
-
-if os.name == "nt":  # Check if the OS is Windows
-    os.system("cls")  # Clear the screen for Windows OS
-else:
-    os.system("clear")  # Clear the screen for Unix-like OS
 
 # Initialize colorama
 init(autoreset=True)
@@ -38,6 +30,9 @@ results_dir = os.path.join(path, "Results")
 if not os.path.exists(results_dir):
     os.makedirs(results_dir)
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 # Function to load session from the configuration file
 def load_session():
     if os.path.exists(config_file):
@@ -54,7 +49,7 @@ def save_session(phpsessid, zhetoken):
     }
     with open(config_file, "w") as file:
         json.dump(session_data, file)
-    logging.info("\n[] Session saved successfully.")
+    logging.info("Session saved successfully.")
 
 # Function to prompt the user for session information
 def prompt_for_session():
@@ -102,128 +97,79 @@ def save_to_file(data, file_type):
     with open(output_file, "a+") as file:
         file.write(data + "\n")
 
-# Function to process notifiers
+# Function to process a single page
+def process_page(url, cookies, headers, file_type):
+    try:
+        response = requests.get(url, headers=headers, cookies=cookies, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        urls = set()
+        for tag in soup.find_all('td'):
+            if tag.string and "http" not in tag.string:
+                validated_url = extract_and_validate_url(tag.string)
+                if validated_url:
+                    urls.add(validated_url)
+        return urls
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Request error for {url}: {e}")
+        return set()
+
+# Function to check notifiers
 def check_notifier(defacer_username, phpsessid, zhetoken):
     cookies = {'PHPSESSID': phpsessid, 'ZHE': zhetoken}
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-    page_number = 1
-    counter = 1
-    url = f"http://www.zone-h.org/archive/notifier={defacer_username}"
+    base_url = f"http://www.zone-h.org/archive/notifier={defacer_username}"
+    urls = set()
 
-    while True:
-        try:
-            response = requests.get(url, headers=headers, cookies=cookies)
-            response.raise_for_status()  # Check for HTTP errors
-        except requests.exceptions.RequestException as e:
-            logging.error(f"\n[] Request error for {url}: {e}")
-            continue
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = []
+        for page_number in range(1, 100):  # Adjust the range as needed
+            url = f"{base_url}/page={page_number}" if page_number > 1 else base_url
+            futures.append(executor.submit(process_page, url, cookies, headers, "notifier"))
 
-        soup = BeautifulSoup(response.text, 'html.parser')
-        pages = re.findall(r'page=(\d+)', response.text)
-        pages = len(pages) + 1
+        for future in tqdm(as_completed(futures), total=len(futures), desc=f"Processing {defacer_username}"):
+            urls.update(future.result())
 
-        with open(input_file, "a+") as file:
-            for tag in soup.find_all(re.compile("td")):
-                try:
-                    url = "http://" + tag.string
-                    validated_url = extract_and_validate_url(url)
-                    if validated_url:
-                        save_to_file(validated_url, "notifier")
-                except Exception as e:
-                    logging.error(f"\n[] Error processing URL {tag.string}: {e}")
-                    continue
-
-        counter += 1
-        if counter > pages:
-            logging.info(f"\n[] Number of lines for {defacer_username}: {number_of_lines(input_file)}")
-            break
-        else:
-            page_number += 1
-            url = f"http://www.zone-h.org/archive/notifier={defacer_username}/page={page_number}"
-            logging.info(f"Page {page_number} processed.")
-            sleep(2)
+    for url in urls:
+        save_to_file(url, "notifier")
 
 # Function to check OnHold archives
 def check_onhold(phpsessid, zhetoken):
     cookies = {'PHPSESSID': phpsessid, 'ZHE': zhetoken}
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-    page_number = 1
-    counter = 1
-    url = "http://www.zone-h.org/archive/published=0"
+    base_url = "http://www.zone-h.org/archive/published=0"
+    urls = set()
 
-    while True:
-        try:
-            response = requests.get(url, headers=headers, cookies=cookies)
-            response.raise_for_status()  # Check for HTTP errors
-        except requests.exceptions.RequestException as e:
-            logging.error(f"\n[] Request error for {url}: {e}")
-            continue
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = []
+        for page_number in range(1, 100):  # Adjust the range as needed
+            url = f"{base_url}/page={page_number}" if page_number > 1 else base_url
+            futures.append(executor.submit(process_page, url, cookies, headers, "onhold"))
 
-        soup = BeautifulSoup(response.text, 'html.parser')
-        pages = re.findall(r'page=(\d+)', response.text)
-        pages = len(pages) + 1
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing OnHold"):
+            urls.update(future.result())
 
-        with open(input_file, "a+") as file:
-            for tag in soup.find_all(re.compile("td")):
-                try:
-                    url = "http://" + tag.string
-                    validated_url = extract_and_validate_url(url)
-                    if validated_url:
-                        save_to_file(validated_url, "onhold")
-                except Exception as e:
-                    logging.error(f"\n[] Error processing URL {tag.string}: {e}")
-                    continue
-
-        counter += 1
-        if counter > pages:
-            logging.info(f"\n[] Number of lines for OnHold: {number_of_lines(input_file)}")
-            break
-        else:
-            page_number += 1
-            url = f"http://www.zone-h.org/archive/published=0/page={page_number}"
-            logging.info(f"Page {page_number} processed.")
-            sleep(2)
+    for url in urls:
+        save_to_file(url, "onhold")
 
 # Function to check a specific archive
 def check_archive(archive_url, phpsessid, zhetoken):
     cookies = {'PHPSESSID': phpsessid, 'ZHE': zhetoken}
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-    page_number = 1
-    counter = 1
-    url = f"http://www.zone-h.org/archive/{archive_url}"
+    base_url = f"http://www.zone-h.org/archive/{archive_url}"
+    urls = set()
 
-    while True:
-        try:
-            response = requests.get(url, headers=headers, cookies=cookies)
-            response.raise_for_status()  # Check for HTTP errors
-        except requests.exceptions.RequestException as e:
-            logging.error(f"\n[] Request error for {url}: {e}")
-            continue
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = []
+        for page_number in range(1, 100):  # Adjust the range as needed
+            url = f"{base_url}/page={page_number}" if page_number > 1 else base_url
+            futures.append(executor.submit(process_page, url, cookies, headers, "archive"))
 
-        soup = BeautifulSoup(response.text, 'html.parser')
-        pages = re.findall(r'page=(\d+)', response.text)
-        pages = len(pages) + 1
+        for future in tqdm(as_completed(futures), total=len(futures), desc=f"Processing {archive_url}"):
+            urls.update(future.result())
 
-        with open(input_file, "a+") as file:
-            for tag in soup.find_all(re.compile("td")):
-                try:
-                    url = "http://" + tag.string
-                    validated_url = extract_and_validate_url(url)
-                    if validated_url:
-                        save_to_file(validated_url, "archive")
-                except Exception as e:
-                    logging.error(f"\n[] Error processing URL {tag.string}: {e}")
-                    continue
-
-        counter += 1
-        if counter > pages:
-            logging.info(f"\n[] Number of lines for archive {archive_url}: {number_of_lines(input_file)}")
-            break
-        else:
-            page_number += 1
-            url = f"http://www.zone-h.org/archive/{archive_url}/page={page_number}"
-            logging.info(f"Page {page_number} processed.")
-            sleep(2)
+    for url in urls:
+        save_to_file(url, "archive")
 
 # Function to display the menu and interact with the user
 def display_menu():
@@ -259,25 +205,25 @@ def display_menu():
             except FileNotFoundError:
                 print(Fore.RED + f"\n[] The file {file_list} was not found.")
 
-        elif choice == "4":
-            file_list = input(Fore.CYAN + "\n[] Enter the path to the archive list file: ").strip()
-            try:
-                with open(file_list, "r") as f:
-                    usernames = [line.strip() for line in f.readlines()]
-                phpsessid, zhetoken = load_session()
-                if not phpsessid or not zhetoken:
-                    phpsessid, zhetoken = prompt_for_session()
-                for username in usernames:
-                    check_notifier(username, phpsessid, zhetoken)
-            except FileNotFoundError:
-                print(Fore.RED + f"\n[] The file {file_list} was not found.")
-        
         elif choice == "3":
             archive_url = input(Fore.CYAN + "\n[] Enter the archive URL: ").strip()
             phpsessid, zhetoken = load_session()
             if not phpsessid or not zhetoken:
                 phpsessid, zhetoken = prompt_for_session()
             check_archive(archive_url, phpsessid, zhetoken)
+        
+        elif choice == "4":
+            file_list = input(Fore.CYAN + "\n[] Enter the path to the archive list file: ").strip()
+            try:
+                with open(file_list, "r") as f:
+                    archive_urls = [line.strip() for line in f.readlines()]
+                phpsessid, zhetoken = load_session()
+                if not phpsessid or not zhetoken:
+                    phpsessid, zhetoken = prompt_for_session()
+                for archive_url in archive_urls:
+                    check_archive(archive_url, phpsessid, zhetoken)
+            except FileNotFoundError:
+                print(Fore.RED + f"\n[] The file {file_list} was not found.")
         
         elif choice == "5":
             phpsessid, zhetoken = load_session()
@@ -289,10 +235,9 @@ def display_menu():
             phpsessid, zhetoken = load_session()
             if not phpsessid or not zhetoken:
                 phpsessid, zhetoken = prompt_for_session()
-            # Check everything at once (could be optimized further)
             print(Fore.CYAN + "\n[INFO] Checking everything...\n")
             check_onhold(phpsessid, zhetoken)
-            # You may want to perform all checks in parallel here with threading or multiprocessing
+            # Add checks for notifiers and archives here if needed
         
         elif choice == "7":
             print(Fore.RED + "\n[] Exiting the program...\n")
